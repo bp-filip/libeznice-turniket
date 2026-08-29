@@ -1,0 +1,80 @@
+# Hardware
+
+## Arduino Nano pins
+
+| Pin | Use | Notes |
+|-----|-----|-------|
+| D0 (RX) | ESP32 GPIO27 via shifter | disconnect before uploading |
+| D1 (TX) | ESP32 GPIO14 via shifter | disconnect before uploading |
+| D2 | arrow in relay | red / green |
+| D3 | open in relay | entry |
+| D4 | open out relay | exit, held open permanently |
+| D5 | scanner TX | inverted TTL, SoftwareSerial RX |
+| D10 | reserved | SoftwareSerial demands a TX pin it never uses |
+| A4 / A5 | LCD SDA / SCL | I2C at 400 kHz |
+
+The relay board is **active-LOW**: writing `LOW` energises a coil.
+
+D2 and D4 were swapped relative to the original design during bring-up. The
+pin numbers in the sketch reflect the wiring as built.
+
+## ESP32 pins
+
+| Pin | Use |
+|-----|-----|
+| GPIO14 | Serial2 RX, from Nano D1 |
+| GPIO27 | Serial2 TX, to Nano D0 |
+
+Avoid GPIO12 for RX: it is a strapping pin that sets flash voltage at boot,
+and an idle UART line holds it high, which stops the board booting.
+
+GPIO 6-11 are wired to flash. GPIO 34-39 are input-only.
+
+## Level shifter
+
+Bidirectional BSS138-style board. HV to Nano 5V, LV to ESP32 3V3, all three
+grounds bonded.
+
+This part is a known weak point - see the crosstalk note in CLAUDE.md.
+
+## Display
+
+20x4 character LCD on a PCF8574 I2C backpack, address `0x27` (some boards
+are `0x3F`). Contrast is set by the trimpot on the backpack.
+
+The controller has no accented glyphs. `czech_lcd.h` loads up to 8 accented
+letters per message into custom character memory.
+
+## Scanner: RTScan RT830A
+
+Wired directly, 5V, TX only - the Nano never talks to it.
+
+Configured by scanning setup barcodes from the manual
+(`User-Manual-RT830A-RT870-RT860_V1.2.3.pdf`):
+
+| Setting | Section | Why |
+|---------|---------|-----|
+| RS232 interface | 2.7 | default is USB HID keyboard; the TTL pins stay silent otherwise |
+| 9600 baud | 2.2 | default 115200 is too fast for SoftwareSerial on a 16 MHz AVR |
+| 8N1 | 2.3 | only needed if framing was changed by accident |
+| Add CRLF | 4.1 | no suffix by default, so codes have no terminator |
+
+"RS232 interface" is RTScan's name for TTL-level output on the 12-pin
+header. It inverts the logic, which is why `SoftwareSerial` is constructed
+with `true`. Do not connect the development kit's DB9 - that is true RS232
+at ±12V and would damage the Nano.
+
+Avoid the "Restore All Factory Defaults" barcode: it returns the module to
+USB keyboard mode and everything above has to be redone.
+
+## Turnstile
+
+Entry and exit are separate relay-driven inputs. The arrow indicator is
+24V, driven through the third relay: NO contact shows one colour, NC the
+other, so a single relay covers both states.
+
+The panic input is unused - that motor is broken.
+
+An earlier attempt used SSRs for the arrows. They stayed permanently lit,
+most likely because AC-output SSRs (triac) cannot switch DC off. Mechanical
+relays replaced them.
