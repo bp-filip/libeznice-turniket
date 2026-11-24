@@ -80,8 +80,12 @@ simple 1k/2k divider for Nano to ESP32.
 the 4-bit interface falling half a byte out of step. `lcdResync()` in the
 Nano sketch writes the 3-3-3-2 nibble sequence straight to the PCF8574
 (the library's `command()` is `inline` in its `.cpp` and cannot be called
-from outside). It costs about 10 ms of `delay()` per redraw. See
-`docs/hardware.md` for the hardware causes.
+from outside). It costs about 10 ms of `delay()` per redraw. Redraws
+also wait until `RELAY_SETTLE_MS` (50 ms) after the last relay change, so an
+LCD transfer never overlaps relay switching noise - without this, the end
+of every entry hold released the relays and redrew the idle prompt in the
+same pass. All relay writes must go through `writeRelayPin()` for the
+timer to see them. See `docs/hardware.md` for the hardware causes.
 
 **The LCD cannot show diacritics natively.** `czech_lcd.h` decodes UTF-8,
 loads up to 8 accented letters into the display's custom character memory

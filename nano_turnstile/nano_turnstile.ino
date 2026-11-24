@@ -37,7 +37,8 @@
  *
  * The LCD controller is resynchronised before every redraw, so a glitch
  * from relay noise or a dropped I2C transfer clears at the next message
- * instead of leaving garbage until power-off.
+ * instead of leaving garbage until power-off. Redraws also wait until the
+ * relays have settled (RELAY_SETTLE_MS), so the two never coincide.
  *
  * Disconnect D0/D1 before uploading. No Serial Monitor - the hardware
  * UART belongs to the ESP32.
@@ -72,6 +73,11 @@ const bool DEFAULT_OPEN_IN  = false;
 const bool DEFAULT_ARROW_IN = false;    // false = red
 
 const uint16_t BLINK_MS = 500;
+
+// A relay switching makes a few milliseconds of electrical noise (coil
+// spike, contact bounce). Redraws wait this long after the last relay
+// change so the LCD transfer never runs during it.
+const uint8_t RELAY_SETTLE_MS = 50;
 
 // --- Serial / display ----------------------------------------------------
 const uint8_t  SCANNER_RX_PIN = 5;
@@ -123,6 +129,8 @@ uint32_t holdUntilMs  = 0;
 bool     blinkActive  = false;
 uint32_t nextBlinkMs  = 0;
 bool     blinkOn      = false;
+
+uint32_t lastRelayChangeMs = 0;         // when any relay last changed state
 
 // Last code sent, kept as a hash to save RAM.
 bool     haveLastCode = false;
@@ -188,12 +196,19 @@ void loop() {
 }
 
 // --- Relay control -------------------------------------------------------
+// All relay writes go through here so the settle timer sees every change.
+// Rewriting a pin with the state it already has is not a change.
+void writeRelayPin(uint8_t pin, uint8_t level) {
+  if (digitalRead(pin) != level) lastRelayChangeMs = millis();
+  digitalWrite(pin, level);
+}
+
 void setRelay(uint8_t pin, bool on) {
-  digitalWrite(pin, on ? ACTIVE : IDLE);
+  writeRelayPin(pin, on ? ACTIVE : IDLE);
 }
 
 void setArrowIn(bool yes) {
-  digitalWrite(PIN_ARROW_IN, yes ? ARROW_YES_STATE : ARROW_NO_STATE);
+  writeRelayPin(PIN_ARROW_IN, yes ? ARROW_YES_STATE : ARROW_NO_STATE);
 }
 
 void applyDefaults() {
@@ -417,8 +432,15 @@ void lcdResync() {
 
 // Resync, decode UTF-8, load any accented letters into CGRAM, then write
 // four rows. Text arrives from the ESP32 already wrapped and padded to 20
-// columns. About 10 ms of the time is the resync.
+// columns. About 10 ms of the time is the resync, plus up to
+// RELAY_SETTLE_MS if a relay has just switched.
 void showUtf8(const char *text) {
+  // Let a relay that has just switched settle first. At most
+  // RELAY_SETTLE_MS; scanner and link bytes keep arriving in their
+  // interrupt-driven buffers meanwhile. The end of every entry hold hits
+  // this: relays release and the idle prompt is redrawn in the same pass.
+  while ((millis() - lastRelayChangeMs) < RELAY_SETTLE_MS) { }
+
   lcdResync();                          // before CGRAM is loaded
   uint8_t len = czechPrepare(lcd, text, displayBuf, SCREEN_CHARS);
 

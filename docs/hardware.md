@@ -56,7 +56,10 @@ The backpack drives the controller four bits at a time. If one transfer is
 lost, every later character is read half a byte off and the screen shows
 garbage. The Nano resynchronises the controller before every redraw, so
 this now clears at the next message (at most about 12 seconds, the idle
-refresh). It does not stop the glitch happening. Usual causes, and the
+refresh). Redraws are also held back until 50 ms after any relay switches,
+so the noise of a switching relay never coincides with an LCD transfer.
+Neither stops a glitch caused by a supply dip affecting the LCD on its
+own. Usual causes, and the
 hardware fixes for them:
 
 - **Relay switching noise or supply dips.** Power the relay board's coil
