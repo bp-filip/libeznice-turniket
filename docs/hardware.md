@@ -11,7 +11,7 @@
 | D4 | arrow in relay | red / green |
 | D5 | scanner TX | inverted TTL, SoftwareSerial RX |
 | D10 | reserved | SoftwareSerial demands a TX pin it never uses |
-| A4 / A5 | LCD SDA / SCL | I2C at 400 kHz |
+| A4 / A5 | LCD SDA / SCL | I2C at 100 kHz, the PCF8574's rated maximum |
 
 The relay board is **active-LOW**: writing `LOW` energises a coil.
 
@@ -49,6 +49,31 @@ are `0x3F`). Contrast is set by the trimpot on the backpack.
 
 The controller has no accented glyphs. `czech_lcd.h` loads up to 8 accented
 letters per message into custom character memory.
+
+### Random characters on screen
+
+The backpack drives the controller four bits at a time. If one transfer is
+lost, every later character is read half a byte off and the screen shows
+garbage. The Nano resynchronises the controller before every redraw, so
+this now clears at the next message (at most about 12 seconds, the idle
+refresh). It does not stop the glitch happening. Usual causes, and the
+hardware fixes for them:
+
+- **Relay switching noise or supply dips.** Power the relay board's coil
+  side separately (remove the JD-VCC jumper on boards that have one, so the
+  optocouplers isolate it). Put 100 nF plus 220 uF across the backpack's
+  5V and GND, close to the backpack.
+- **Long or badly routed I2C wires.** Keep SDA/SCL short and away from relay
+  and 24V wiring; twist each with a ground wire if they run any distance.
+- **Inductive loads on the relay contacts** need a flyback diode (DC) or an
+  RC snubber (AC) across the load.
+
+Wrong letters that are not garbage (a missing word, rows shifted) point at
+the ESP32 link instead. Those lines are now caught by the checksum, see
+`protocol.md`.
+
+I2C speed: `lcd.init()` calls `Wire.begin()`, which resets the bus to
+100 kHz, so `Wire.setClock()` only has an effect after `init()`.
 
 ## Scanner: RTScan RT830A
 

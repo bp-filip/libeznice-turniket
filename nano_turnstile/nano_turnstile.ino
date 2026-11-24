@@ -31,6 +31,14 @@
  * The message stays on screen exactly as long as the entry relay is held;
  * denials and local errors use MESSAGE_HOLD instead.
  *
+ * Every line on the ESP32 link, in both directions, ends in "*HH": a CRC-8
+ * of everything before the '*'. Lines without a valid checksum are dropped,
+ * so this sketch only works with ESP32 firmware 1.0.3 or later.
+ *
+ * The LCD controller is resynchronised before every redraw, so a glitch
+ * from relay noise or a dropped I2C transfer clears at the next message
+ * instead of leaving garbage until power-off.
+ *
  * Disconnect D0/D1 before uploading. No Serial Monitor - the hardware
  * UART belongs to the ESP32.
  *
@@ -72,6 +80,7 @@ const uint32_t SCANNER_BAUD   = 9600;
 const uint32_t LINK_BAUD      = 9600;
 
 const uint8_t  LCD_ADDR = 0x27;         // try 0x3F if the screen stays blank
+const uint32_t I2C_CLOCK = 100000;      // PCF8574 is rated for 100 kHz only
 const uint8_t  LCD_COLS = 20;
 const uint8_t  LCD_ROWS = 4;
 
@@ -132,9 +141,8 @@ void setup() {
   pinMode(PIN_ARROW_IN, OUTPUT);
   applyDefaults();
 
-  Wire.begin();
-  Wire.setClock(400000);
-  lcd.init();
+  lcd.init();                           // calls Wire.begin() itself
+  Wire.setClock(I2C_CLOCK);             // after init(), which resets it
   lcd.backlight();
   showUtf8(IDLE_TEXT);
 
@@ -242,6 +250,33 @@ void applyControl(const char *line) {
   }
 }
 
+// --- Link checksum -------------------------------------------------------
+// CRC-8, polynomial 0x07. The ESP32 uses the same function.
+uint8_t crc8(const char *s, uint16_t n) {
+  uint8_t c = 0;
+  while (n--) {
+    c ^= (uint8_t)*s++;
+    for (uint8_t b = 0; b < 8; b++) c = (c & 0x80) ? (c << 1) ^ 0x07 : (c << 1);
+  }
+  return c;
+}
+
+int8_t hexDigit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Check and remove a trailing "*HH". Returns false if it is missing or wrong.
+bool stripChecksum(char *line, uint16_t len) {
+  if (len < 3 || line[len - 3] != '*') return false;
+  int8_t hi = hexDigit(line[len - 2]), lo = hexDigit(line[len - 1]);
+  if (hi < 0 || lo < 0) return false;
+  if (crc8(line, len - 3) != (uint8_t)((hi << 4) | lo)) return false;
+  line[len - 3] = '\0';
+  return true;
+}
+
 // --- Scanner -------------------------------------------------------------
 // FNV-1a: enough to tell "same code again" from "different code".
 uint32_t hashCode(const char *s) {
@@ -289,7 +324,13 @@ void readScanner() {
 }
 
 void sendToEsp(const char *code) {
-  Serial.println(code);
+  const char HEX_DIGITS[] = "0123456789ABCDEF";
+  uint8_t c = crc8(code, strlen(code));
+  Serial.print(code);
+  Serial.write('*');
+  Serial.write(HEX_DIGITS[c >> 4]);
+  Serial.write(HEX_DIGITS[c & 0x0F]);
+  Serial.println();
   Serial.flush();
   while (Serial.available()) Serial.read();   // discard our own echo
 
@@ -307,7 +348,9 @@ void readLink() {
     if (c == '\r' || c == '\n') {
       if (lineLen > 0) {
         lineBuf[lineLen] = '\0';
-        handleLine(lineBuf);
+        // Corrupted or unchecked lines are dropped, not displayed. A lost
+        // result shows as the reply timeout.
+        if (stripChecksum(lineBuf, lineLen)) handleLine(lineBuf);
         lineLen = 0;
       }
     } else {
@@ -336,9 +379,47 @@ void handleLine(const char *line) {
 }
 
 // --- Display -------------------------------------------------------------
-// Decode UTF-8, load any accented letters into CGRAM, then write four rows.
-// Text arrives from the ESP32 already wrapped and padded to 20 columns.
+// The backpack drives the HD44780 four bits at a time. If one transfer is
+// lost (relay noise, a brown-out of the LCD alone), the controller reads
+// every later byte half a byte off and shows garbage until re-initialised.
+//
+// Nibbles 3, 3, 3, 2 bring it back to 4-bit mode from any state: synced,
+// half a byte off, or reset to 8-bit. Written straight to the PCF8574
+// because the library's command() is not callable from outside it.
+// Pin mapping as in LiquidCrystal_I2C: P0 RS, P2 EN, P3 backlight, P4-7 data.
+const uint8_t LCD_EN = 0x04;
+const uint8_t LCD_BL = 0x08;
+
+void lcdNibble(uint8_t nibble) {
+  uint8_t v = (nibble << 4) | LCD_BL;   // RS = 0: command
+  Wire.beginTransmission(LCD_ADDR);
+  Wire.write(v);                        // RS settles before EN rises
+  Wire.write(v | LCD_EN);
+  Wire.write(v);
+  Wire.endTransmission();
+  delayMicroseconds(50);
+}
+
+void lcdCommand(uint8_t cmd) {
+  lcdNibble(cmd >> 4);
+  lcdNibble(cmd & 0x0F);
+}
+
+void lcdResync() {
+  lcdNibble(0x3); delay(5);
+  lcdNibble(0x3); delay(1);
+  lcdNibble(0x3); delay(1);
+  lcdNibble(0x2); delay(1);
+  lcdCommand(0x28);                     // 4-bit, 2 lines, 5x8 font
+  lcdCommand(0x0C);                     // display on, no cursor, no blink
+  lcdCommand(0x06);                     // increment, no shift
+}
+
+// Resync, decode UTF-8, load any accented letters into CGRAM, then write
+// four rows. Text arrives from the ESP32 already wrapped and padded to 20
+// columns. About 10 ms of the time is the resync.
 void showUtf8(const char *text) {
+  lcdResync();                          // before CGRAM is loaded
   uint8_t len = czechPrepare(lcd, text, displayBuf, SCREEN_CHARS);
 
   for (uint8_t row = 0; row < LCD_ROWS; row++) {

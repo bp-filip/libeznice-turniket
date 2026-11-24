@@ -3,9 +3,32 @@
 9600 baud, 8N1, newline-terminated lines, between Nano D0/D1 and ESP32
 GPIO14/27.
 
+## Checksum
+
+Every line in both directions ends in `*HH`: a CRC-8 (polynomial `0x07`,
+initial value 0, as CRC-8/SMBUS; `"123456789"` gives `F4`) of every byte
+before the `*`, as two uppercase hex digits. The examples below omit it;
+on the wire the control line reads
+
+```
+CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000;BLINK=NO*7C
+```
+
+The receiver checks the last three bytes and drops the line if the
+checksum is missing or wrong. A `*` inside the payload is harmless, because
+only the final three bytes are read as the checksum.
+
+Dropped lines are not answered: on the crosstalking link a reply to garbage
+could start a loop. A dropped scan or result therefore shows on the Nano
+as the 10-second reply timeout ("Server neodpovida").
+
+The Nano accepts **only** lines with a valid checksum. Nano firmware with
+checksums needs ESP32 firmware 1.0.3 or later, and the other way round, so
+the two boards must be flashed together.
+
 ## Nano to ESP32
 
-The raw scanned code, one line:
+The raw scanned code, one line (plus the checksum):
 
 ```
 PEVc5LvcCDeOcvwtlOcHY2weAU

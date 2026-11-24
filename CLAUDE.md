@@ -67,11 +67,21 @@ source, suspect this first.
 **The link crosstalks.** The bidirectional BSS138-style level shifter is
 designed for open-drain I2C, not push-pull UART. The ESP32 has been seen
 receiving its own transmissions, which once caused a runaway loop of API
-calls. Both sketches now drain their RX after transmitting, and the ESP32
-rejects any line containing its own protocol markers. **The underlying
+calls. Both sketches now drain their RX after transmitting, the ESP32
+rejects any line containing its own protocol markers, and every line
+carries a CRC-8 checksum that the receiver checks (see `docs/protocol.md`).
+The Nano accepts only checksummed lines, so **both boards must be flashed
+from the same release** - a Nano update means an ESP32 update too. **The underlying
 hardware issue is unfixed.** The intended fix is to drop the shifter on the
 ESP32 to Nano direction entirely (the Nano reads 3.3V as HIGH) and use a
 simple 1k/2k divider for Nano to ESP32.
+
+**The LCD resyncs before every redraw.** Random characters on the LCD are
+the 4-bit interface falling half a byte out of step. `lcdResync()` in the
+Nano sketch writes the 3-3-3-2 nibble sequence straight to the PCF8574
+(the library's `command()` is `inline` in its `.cpp` and cannot be called
+from outside). It costs about 10 ms of `delay()` per redraw. See
+`docs/hardware.md` for the hardware causes.
 
 **The LCD cannot show diacritics natively.** `czech_lcd.h` decodes UTF-8,
 loads up to 8 accented letters into the display's custom character memory
@@ -117,7 +127,9 @@ it is until the ESP32 answers for the new code. This is deliberate.
    checks that it *differs* from `version.txt` in the latest release, not
    that it is newer. A build whose version differs from the release will
    "update" itself to the release on every boot, including downgrading.
-   Bump it together with publishing a release (currently 1.0.2).
+   Bump it together with publishing a release (currently 1.0.3). Because the
+   Nano requires checksums, an ESP32 that downgrades itself to 1.0.2 or
+   earlier loses contact with the Nano entirely.
 6. **Panic output removed.** The panic motor is broken. `ALLOW_MULTI`
    therefore differs from `ALLOW_SINGLE` only in hold duration and the
    blinking arrow.

@@ -9,6 +9,11 @@
  *   CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000;BLINK=NO
  *   MSG:Vstupenka je platna.
  *
+ * Every line in both directions ends in "*HH": a CRC-8 of everything before
+ * the '*', as two uppercase hex digits. Lines that fail the check are
+ * dropped on both sides. The Nano requires it, so both boards must run
+ * firmware from the same release.
+ *
  * HOLD is milliseconds; the Nano reverts to its defaults afterwards.
  * BLINK=YES makes the Nano blink the arrow for the duration of the hold.
  *
@@ -34,7 +39,7 @@
 #include "secrets.h"
 
 // --- Version -------------------------------------------------------------
-#define FIRMWARE_VERSION "1.0.2"
+#define FIRMWARE_VERSION "1.0.3"
 
 // --- WiFi ----------------------------------------------------------------
 // Values live in secrets.h, which is gitignored. Copy secrets.h.example
@@ -247,6 +252,42 @@ String tidyMessage(String text) {
   return text;
 }
 
+// --- Link checksum -------------------------------------------------------
+// CRC-8, polynomial 0x07. The Nano uses the same function.
+static uint8_t crc8(const char *s, size_t n) {
+  uint8_t c = 0;
+  while (n--) {
+    c ^= (uint8_t)*s++;
+    for (uint8_t b = 0; b < 8; b++) c = (c & 0x80) ? (c << 1) ^ 0x07 : (c << 1);
+  }
+  return c;
+}
+
+static int hexDigit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Check and remove a trailing "*HH". Returns false if it is missing or wrong.
+static bool stripChecksum(char *line) {
+  size_t len = strlen(line);
+  if (len < 3 || line[len - 3] != '*') return false;
+  int hi = hexDigit(line[len - 2]), lo = hexDigit(line[len - 1]);
+  if (hi < 0 || lo < 0) return false;
+  if (crc8(line, len - 3) != (uint8_t)((hi << 4) | lo)) return false;
+  line[len - 3] = '\0';
+  return true;
+}
+
+// Write one line to the Nano with its checksum appended.
+static void sendLine(const String &line) {
+  char tail[4];
+  snprintf(tail, sizeof(tail), "*%02X", crc8(line.c_str(), line.length()));
+  Serial2.print(line);
+  Serial2.println(tail);
+}
+
 // --- Nano link task, pinned to core 0 ------------------------------------
 // Stack is generous because the TLS handshake for the API call runs here.
 void linkTask(void *pv) {
@@ -257,7 +298,13 @@ void linkTask(void *pv) {
       if (c == '\r' || c == '\n') {
         if (msgLen > 0) {
           msgBuf[msgLen] = '\0';
-          handleMessage(msgBuf);
+          // A corrupted line is dropped silently. Answering it could start
+          // a loop on the crosstalking link; the Nano times out instead.
+          if (stripChecksum(msgBuf)) {
+            handleMessage(msgBuf);
+          } else {
+            Serial.printf("! bad checksum: %s\n", msgBuf);
+          }
           msgLen = 0;
         }
       } else if ((uint8_t)c >= 0x20) {
@@ -275,8 +322,7 @@ void linkTask(void *pv) {
 
 // Send display text with no control line attached.
 void sendMessageOnly(const String &text) {
-  Serial2.print("MSG:");
-  Serial2.println(wrapWords(text));
+  sendLine("MSG:" + wrapWords(text));
   Serial2.flush();
   while (Serial2.available()) Serial2.read();   // discard our own echo
 }
@@ -291,9 +337,8 @@ void sendToNano(const Control &ctl, const String &message) {
 
   // Drop anything that arrived while we were transmitting: on a crosstalking
   // link that is our own output coming back.
-  Serial2.println(line);
-  Serial2.print("MSG:");
-  Serial2.println(wrapWords(message));
+  sendLine(line);
+  sendLine("MSG:" + wrapWords(message));
   Serial2.flush();
   while (Serial2.available()) Serial2.read();
 
