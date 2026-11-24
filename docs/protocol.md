@@ -23,7 +23,7 @@ Two line types.
 ### Control
 
 ```
-CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000
+CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000;BLINK=NO
 ```
 
 | Field | Values | Meaning |
@@ -32,12 +32,20 @@ CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000
 | `OPEN_OUT` | `YES` / `NO` | **ignored** while `ALWAYS_OPEN_OUT` is set |
 | `ARROW_IN` | `YES` / `NO` | green / red |
 | `HOLD` | milliseconds | how long to hold before reverting to defaults |
+| `BLINK` | `YES` / `NO` | blink the arrow every 500 ms for the duration of the hold |
 
 Parsing is by substring search, so field order does not matter and unknown
 fields are ignored. A missing field falls back to its default.
 
 `HOLD=0` means no timed hold - used for denials, where nothing needs
-reverting.
+reverting. `BLINK` only has an effect while a hold is running.
+
+| Action | `OPEN_IN` | `ARROW_IN` | `HOLD` | `BLINK` |
+|--------|-----------|------------|--------|---------|
+| `ALLOW_SINGLE` | YES | YES | 10000 | NO |
+| `ALLOW_MULTI` | YES | YES | 300000 | YES |
+| `ALLOW_MULTI_HOUR` | YES | YES | 3600000 | NO |
+| `DENY` / unknown | NO | NO | 0 | NO |
 
 ### Message
 
@@ -59,10 +67,13 @@ idle prompt and the "checking" text.
 | `API_TIMEOUT_MS` | ESP32 | 4000 | must stay below the Nano's `REPLY_TIMEOUT` |
 | `REPLY_TIMEOUT` | Nano | 10000 | gives up and shows "Server neodpovídá" |
 | `REPEAT_LOCKOUT_MS` | ESP32 | 2000 | same code twice in a row is one scan |
+| `REPEAT_LOCKOUT_MS` | Nano | 2500 | drops the repeat before sending, so the Nano never waits for a reply the ESP32 will not give; kept above the ESP32's |
 | `IDLE_REFRESH_MS` | ESP32 | 12000 | must stay below the Nano's `MESSAGE_HOLD` |
 | `MESSAGE_HOLD` | Nano | 15000 | how long a message stays without a relay hold |
 | `HOLD_SINGLE_MS` | ESP32 | 10000 | entry hold for a single ticket |
 | `HOLD_MULTI_MS` | ESP32 | 300000 | entry hold for a group ticket, untested |
+| `HOLD_MULTI_HOUR_MS` | ESP32 | 3600000 | entry hold for a one-hour ticket |
+| `BLINK_MS` | Nano | 500 | arrow blink period during a `BLINK=YES` hold |
 
 Both boards flush and drain their RX after transmitting, to discard anything
 the crosstalking link reflects back during their own transmission.
@@ -83,7 +94,8 @@ Response:
 { "status": "valid", "action": "ALLOW_SINGLE", "message": "Vstupenka je platna." }
 ```
 
-`action` is one of `ALLOW_SINGLE`, `ALLOW_MULTI`, `DENY`. Anything
+`action` is one of `ALLOW_SINGLE`, `ALLOW_MULTI`, `ALLOW_MULTI_HOUR`,
+`DENY`. Anything
 unrecognised is treated as `DENY`.
 
 The API returns JSON on error codes too (400, 401, 405), so the response

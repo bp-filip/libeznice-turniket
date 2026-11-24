@@ -9,4 +9,5 @@ struct Control {
   const char *openOut;     // YES / NO
   const char *arrowIn;     // YES / NO
   uint32_t    holdMs;      // how long to hold this state before reverting
+  const char *blink;       // YES / NO - blink the arrow during the hold
 };

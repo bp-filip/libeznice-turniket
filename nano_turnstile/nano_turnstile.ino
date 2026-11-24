@@ -2,10 +2,7 @@
  * Nano: scan a QR code -> send to ESP32 -> drive the turnstile relays for
  *       the duration the ESP32 specifies, then revert to defaults.
  *
- * A new scan cancels whatever entry is in progress: the turnstile closes
- * and the arrow goes red before the new code is sent for validation.
- *
- * The exit direction is always open. ALWAYS_OPEN_OUT holds that relay
+ * The exit direction is always open. ALWAYS_OPEN_OUT below holds that relay
  * energised from boot and ignores anything the ESP32 says about it, so
  * people can leave even if the network, the server or the ESP32 is down.
  *
@@ -15,16 +12,21 @@
  *   D1 (TX) -> shifter -> ESP32 GPIO14
  *   D0 (RX) <- shifter <- ESP32 GPIO27
  *
- *   D2 arrow in relay
+ *   D2 open out relay
  *   D3 open in relay
- *   D4 open out relay
+ *   D4 arrow in relay
  *   D10 reserved: SoftwareSerial needs a TX pin it never uses.
  *
  * Relay board is active-LOW. Arrow out is wired permanently on.
  *
  * Behaviour:
- *   ALLOW_SINGLE  entry held 10 s, arrow green
- *   DENY          entry stays shut, arrow stays red
+ *   ALLOW_SINGLE      entry held 10 s, arrow steady green
+ *   ALLOW_MULTI       entry held 5 min, arrow blinking every 500 ms
+ *   ALLOW_MULTI_HOUR  entry held 1 hour, arrow steady green
+ *   DENY              entry stays shut, arrow stays red
+ *
+ * A new scan does not cancel an entry in progress: the turnstile stays as
+ * it is until the ESP32 answers for the new code.
  *
  * The message stays on screen exactly as long as the entry relay is held;
  * denials and local errors use MESSAGE_HOLD instead.
@@ -42,22 +44,26 @@
 #include "czech_lcd.h"
 
 // --- Output pins ---------------------------------------------------------
-const uint8_t PIN_ARROW_IN = 2;
+const uint8_t PIN_OPEN_OUT = 2;
 const uint8_t PIN_OPEN_IN  = 3;
-const uint8_t PIN_OPEN_OUT = 4;
+const uint8_t PIN_ARROW_IN = 4;
 
 // --- Polarity ------------------------------------------------------------
 const uint8_t ACTIVE = LOW;       // active-LOW relay board
 const uint8_t IDLE   = HIGH;
 
-// Swap these two if the arrow shows the wrong colour.
-const uint8_t ARROW_YES_STATE = ACTIVE;  // green
-const uint8_t ARROW_NO_STATE  = IDLE;    // red
+// Arrow relay wiring was swapped, so the coil states are inverted here.
+// Side effect: with the Nano unpowered or resetting the arrow shows green
+// (the entry relay is still shut).
+const uint8_t ARROW_YES_STATE = IDLE;    // green
+const uint8_t ARROW_NO_STATE  = ACTIVE;  // red
 
 // --- Default states ------------------------------------------------------
 const bool ALWAYS_OPEN_OUT  = true;     // exit never closes
 const bool DEFAULT_OPEN_IN  = false;
 const bool DEFAULT_ARROW_IN = false;    // false = red
+
+const uint16_t BLINK_MS = 500;
 
 // --- Serial / display ----------------------------------------------------
 const uint8_t  SCANNER_RX_PIN = 5;
@@ -74,6 +80,11 @@ const uint8_t  MAX_CODE_LEN  = 80;
 const uint16_t LINE_BUF_LEN  = 200;     // UTF-8 needs 2 bytes per accent
 const uint16_t REPLY_TIMEOUT = 10000;   // ms to wait for the ESP32
 const uint32_t MESSAGE_HOLD  = 15000;   // used when no relay hold is running
+
+// The ESP32 silently drops a repeat of the same code within its
+// REPEAT_LOCKOUT_MS (2 s). Drop it here first, with a margin, so the Nano
+// never waits for a reply that is not coming and then times out.
+const uint16_t REPEAT_LOCKOUT_MS = 2500;
 
 const char IDLE_TEXT[]    = "Prilozte QR kod";
 const char BUSY_TEXT[]    = "Overuji...";
@@ -98,8 +109,16 @@ bool     showingMessage = false;
 uint32_t messageUntilMs = 0;
 
 // Relay hold, independent of how long the message stays on screen.
-bool     holdActive  = false;
-uint32_t holdUntilMs = 0;
+bool     holdActive   = false;
+uint32_t holdUntilMs  = 0;
+bool     blinkActive  = false;
+uint32_t nextBlinkMs  = 0;
+bool     blinkOn      = false;
+
+// Last code sent, kept as a hash to save RAM.
+bool     haveLastCode = false;
+uint32_t lastCodeHash = 0;
+uint32_t lastCodeMs   = 0;
 
 void showUtf8(const char *text);
 void applyDefaults();
@@ -108,9 +127,9 @@ void handleLine(const char *line);
 void sendToEsp(const char *code);
 
 void setup() {
-  pinMode(PIN_ARROW_IN, OUTPUT);
-  pinMode(PIN_OPEN_IN,  OUTPUT);
   pinMode(PIN_OPEN_OUT, OUTPUT);
+  pinMode(PIN_OPEN_IN,  OUTPUT);
+  pinMode(PIN_ARROW_IN, OUTPUT);
   applyDefaults();
 
   Wire.begin();
@@ -127,9 +146,17 @@ void loop() {
   readScanner();
   readLink();
 
+  // Blink the arrow while a blinking hold is running.
+  if (holdActive && blinkActive && (int32_t)(millis() - nextBlinkMs) >= 0) {
+    nextBlinkMs += BLINK_MS;
+    blinkOn = !blinkOn;
+    setArrowIn(blinkOn);
+  }
+
   // Relay hold expired: back to defaults.
   if (holdActive && (int32_t)(millis() - holdUntilMs) >= 0) {
-    holdActive = false;
+    holdActive  = false;
+    blinkActive = false;
     applyDefaults();
   }
 
@@ -137,7 +164,8 @@ void loop() {
   if (awaitingReply && (millis() - sentAtMs) > REPLY_TIMEOUT) {
     awaitingReply = false;
     lineLen = 0;
-    holdActive = false;
+    holdActive  = false;
+    blinkActive = false;
     applyDefaults();
     showUtf8(TIMEOUT_TEXT);
     showingMessage = true;
@@ -184,11 +212,12 @@ uint32_t parseUint(const char *line, const char *key, uint32_t fallback) {
   return strtoul(p, NULL, 10);
 }
 
-// CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000
+// CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000;BLINK=NO
 void applyControl(const char *line) {
   bool openIn   = parseYesNo(line, "OPEN_IN=",  DEFAULT_OPEN_IN);
   bool arrowIn  = parseYesNo(line, "ARROW_IN=", DEFAULT_ARROW_IN);
   uint32_t hold = parseUint(line, "HOLD=", 0);
+  bool blink    = parseYesNo(line, "BLINK=", false);
 
   setRelay(PIN_OPEN_IN, openIn);
   setArrowIn(arrowIn);
@@ -204,12 +233,26 @@ void applyControl(const char *line) {
   if (hold > 0) {
     holdActive  = true;
     holdUntilMs = millis() + hold;
+    blinkActive = blink;
+    blinkOn     = arrowIn;
+    nextBlinkMs = millis() + BLINK_MS;
   } else {
     holdActive  = false;
+    blinkActive = false;
   }
 }
 
 // --- Scanner -------------------------------------------------------------
+// FNV-1a: enough to tell "same code again" from "different code".
+uint32_t hashCode(const char *s) {
+  uint32_t h = 2166136261UL;
+  while (*s) {
+    h ^= (uint8_t)*s++;
+    h *= 16777619UL;
+  }
+  return h;
+}
+
 void readScanner() {
   while (scanner.available()) {
     char c = scanner.read();
@@ -217,8 +260,20 @@ void readScanner() {
     if (c == '\r' || c == '\n') {
       if (codeLen > 0) {
         codeBuf[codeLen] = '\0';
-        sendToEsp(codeBuf);
         codeLen = 0;
+
+        // Same code again within the lockout: one scan, not two. The
+        // window runs from the last code actually sent, as on the ESP32.
+        uint32_t h = hashCode(codeBuf);
+        if (haveLastCode && h == lastCodeHash &&
+            (millis() - lastCodeMs) < REPEAT_LOCKOUT_MS) {
+          continue;
+        }
+        haveLastCode = true;
+        lastCodeHash = h;
+        lastCodeMs   = millis();
+
+        sendToEsp(codeBuf);
       }
     } else if (c >= 0x20) {
       if (codeLen < MAX_CODE_LEN) {
@@ -234,10 +289,6 @@ void readScanner() {
 }
 
 void sendToEsp(const char *code) {
-  // A new scan cancels any entry in progress: close up and start fresh.
-  holdActive = false;
-  applyDefaults();
-
   Serial.println(code);
   Serial.flush();
   while (Serial.available()) Serial.read();   // discard our own echo

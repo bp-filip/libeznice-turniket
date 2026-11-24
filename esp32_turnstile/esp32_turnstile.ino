@@ -6,10 +6,11 @@
  * (LCD text, pre-wrapped to 20-character rows).
  *
  * Protocol to the Nano, one line each, newline terminated:
- *   CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000
+ *   CTL:OPEN_IN=YES;OPEN_OUT=NO;ARROW_IN=YES;HOLD=10000;BLINK=NO
  *   MSG:Vstupenka je platna.
  *
  * HOLD is milliseconds; the Nano reverts to its defaults afterwards.
+ * BLINK=YES makes the Nano blink the arrow for the duration of the hold.
  *
  * The idle prompt and the "checking" text are sent from here rather than
  * left to the Nano's own strings, so they carry diacritics and sit one row
@@ -33,7 +34,7 @@
 #include "secrets.h"
 
 // --- Version -------------------------------------------------------------
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.2"
 
 // --- WiFi ----------------------------------------------------------------
 // Values live in secrets.h, which is gitignored. Copy secrets.h.example
@@ -76,6 +77,7 @@ const size_t  MAX_DISPLAY_BYTES = 200;   // trimmed before wrapping
 // --- Hold times ----------------------------------------------------------
 const uint32_t HOLD_SINGLE_MS = 10UL * 1000UL;         // 10 seconds
 const uint32_t HOLD_MULTI_MS  = 5UL * 60UL * 1000UL;   // 5 minutes
+const uint32_t HOLD_MULTI_HOUR_MS = 60UL * 60UL * 1000UL;   // 1 hour
 
 // How long after a result to leave the screen alone before resuming the
 // idle prompt: the hold itself plus the Nano's message time.
@@ -123,15 +125,19 @@ void handleMessage(const char *msg);
 // so people can always leave, whatever the server says.
 //
 // ALLOW_MULTI is untested - only ALLOW_SINGLE is in use for now. It differs
-// only in how long the entry is held.
+// in how long the entry is held and in the blinking arrow. ALLOW_MULTI_HOUR
+// is a one-hour hold with a steady green arrow.
 Control controlForAction(const char *action) {
   if (strcmp(action, "ALLOW_SINGLE") == 0) {
-    return { "YES", "NO", "YES", HOLD_SINGLE_MS };
+    return { "YES", "NO", "YES", HOLD_SINGLE_MS, "NO" };
   }
   if (strcmp(action, "ALLOW_MULTI") == 0) {
-    return { "YES", "NO", "YES", HOLD_MULTI_MS };
+    return { "YES", "NO", "YES", HOLD_MULTI_MS, "YES" };
   }
-  return { "NO", "NO", "NO", 0 };            // DENY and anything unknown
+  if (strcmp(action, "ALLOW_MULTI_HOUR") == 0) {
+    return { "YES", "NO", "YES", HOLD_MULTI_HOUR_MS, "NO" };
+  }
+  return { "NO", "NO", "NO", 0, "NO" };      // DENY and anything unknown
 }
 
 // --- Word wrapping -------------------------------------------------------
@@ -281,6 +287,7 @@ void sendToNano(const Control &ctl, const String &message) {
   line += ";OPEN_OUT="; line += ctl.openOut;
   line += ";ARROW_IN="; line += ctl.arrowIn;
   line += ";HOLD=";     line += ctl.holdMs;
+  line += ";BLINK=";    line += ctl.blink;
 
   // Drop anything that arrived while we were transmitting: on a crosstalking
   // link that is our own output coming back.
@@ -363,7 +370,7 @@ void handleMessage(const char *msg) {
   // Our own protocol coming back at us - a reflected or crosstalking link.
   if (strncmp(msg, "CTL:", 4) == 0 || strncmp(msg, "MSG:", 4) == 0 ||
       strstr(msg, "OPEN_IN=") || strstr(msg, "ARROW_IN=") ||
-      strstr(msg, "HOLD=")) {
+      strstr(msg, "HOLD=") || strstr(msg, "BLINK=")) {
     Serial.println("! ignoring echoed protocol line");
     return;
   }

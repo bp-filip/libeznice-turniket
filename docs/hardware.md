@@ -6,17 +6,22 @@
 |-----|-----|-------|
 | D0 (RX) | ESP32 GPIO27 via shifter | disconnect before uploading |
 | D1 (TX) | ESP32 GPIO14 via shifter | disconnect before uploading |
-| D2 | arrow in relay | red / green |
+| D2 | open out relay | exit, held open permanently |
 | D3 | open in relay | entry |
-| D4 | open out relay | exit, held open permanently |
+| D4 | arrow in relay | red / green |
 | D5 | scanner TX | inverted TTL, SoftwareSerial RX |
 | D10 | reserved | SoftwareSerial demands a TX pin it never uses |
 | A4 / A5 | LCD SDA / SCL | I2C at 400 kHz |
 
 The relay board is **active-LOW**: writing `LOW` energises a coil.
 
-D2 and D4 were swapped relative to the original design during bring-up. The
-pin numbers in the sketch reflect the wiring as built.
+The pin numbers in the sketch reflect the wiring as built.
+
+The arrow relay's contacts are wired the other way round from the original
+design, so the sketch inverts it: the coil is **energised for red** and
+released for green (`ARROW_YES_STATE` / `ARROW_NO_STATE`). A consequence is
+that the arrow shows green whenever the Nano is unpowered or resetting. The
+entry relay is released at those times too, so the turnstile stays shut.
 
 ## ESP32 pins
 

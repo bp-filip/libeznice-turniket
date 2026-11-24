@@ -51,7 +51,9 @@ scanner is stuck on SoftwareSerial and the ESP32 link gets the real UART.
 SoftwareSerial cannot receive on a 16 MHz AVR. Configuration is done by
 scanning setup barcodes from the manual, not in software.
 
-**Relays are active-LOW.** `ACTIVE` is `LOW` in the Nano sketch.
+**Relays are active-LOW.** `ACTIVE` is `LOW` in the Nano sketch. The arrow
+relay is wired inverted on top of that: energised = red. See
+`docs/hardware.md`.
 
 **The Nano has no Serial Monitor.** Its hardware UART belongs to the ESP32.
 All Nano debugging happens on the LCD. The ESP32's USB monitor at 115200
@@ -87,7 +89,12 @@ arrow, always-open exit, LCD messages with Czech diacritics and word wrap,
 local OTA over the IDE network port, GitHub-hosted pull updates.
 
 Only `ALLOW_SINGLE` is being tested. `ALLOW_MULTI` is implemented (5-minute
-hold) but unexercised.
+hold, blinking arrow) but unexercised. `ALLOW_MULTI_HOUR` (1-hour hold,
+steady green arrow) was added in 1.0.2; the reference `docs/validator.php`
+does not return it yet.
+
+A new scan does **not** cancel an entry in progress: the turnstile stays as
+it is until the ESP32 answers for the new code. This is deliberate.
 
 ### Known rough edges, roughly in priority order
 
@@ -106,11 +113,18 @@ hold) but unexercised.
    `checkForUpdate()` bricks the device until someone attaches USB. Requires
    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, which the Arduino IDE does not
    expose - would need PlatformIO or ESP-IDF.
-5. **`FIRMWARE_VERSION` is pinned at 1.0.1** by request. GitHub OTA compares
-   it against `version.txt` in the latest release, so while it stays static
-   the device will never see a release as new.
+5. **`FIRMWARE_VERSION` must match the latest release.** GitHub OTA only
+   checks that it *differs* from `version.txt` in the latest release, not
+   that it is newer. A build whose version differs from the release will
+   "update" itself to the release on every boot, including downgrading.
+   Bump it together with publishing a release (currently 1.0.2).
 6. **Panic output removed.** The panic motor is broken. `ALLOW_MULTI`
-   therefore differs from `ALLOW_SINGLE` only in hold duration.
+   therefore differs from `ALLOW_SINGLE` only in hold duration and the
+   blinking arrow.
+7. **Credentials end up in the public release binary.** `secrets.h` keeps
+   them out of the source, but `firmware.bin` is attached to a public
+   release and the WiFi password, API token and OTA password can be read out
+   of it with `strings`.
 
 ## Conventions
 
@@ -123,7 +137,7 @@ hold) but unexercised.
 - **IDE quirk:** the Arduino IDE injects function prototypes at the top of a
   `.ino`, above anything defined in it. A custom type used in a function
   signature must therefore live in a `.h`, which is why `turnstile.h` exists
-  for a five-field struct. Do not move it back into the `.ino`.
+  for a six-field struct. Do not move it back into the `.ino`.
 
 ## Testing
 
@@ -135,9 +149,10 @@ Useful sequence after a change:
 3. Scan a valid code: expect `from Nano:` then `api: HTTP 200`, a `CTL:`
    line, a `MSG:` line, entry relay closed for 10 s, arrow green.
 4. Scan an unknown code: expect `DENY`, arrow stays red.
-5. Scan a second code mid-entry: the first entry should cancel immediately.
-   Use a *different* code - `REPEAT_LOCKOUT_MS` drops the same code within
-   2 seconds.
+5. Scan a second code mid-entry: the entry stays as it is until the new
+   result arrives, then follows it. Use a *different* code -
+   `REPEAT_LOCKOUT_MS` drops the same code within 2 seconds (2.5 s on the
+   Nano, which drops it before sending, so the screen does not change).
 
 If Nano behaviour does not match the source, re-check that the upload
 actually succeeded before debugging anything else.
