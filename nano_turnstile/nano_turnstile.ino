@@ -90,6 +90,7 @@ const uint32_t LINK_BAUD      = 9600;
 
 const uint8_t  LCD_ADDR = 0x27;         // try 0x3F if the screen stays blank
 const uint32_t I2C_CLOCK = 100000;      // PCF8574 is rated for 100 kHz only
+const uint32_t I2C_TIMEOUT_US = 25000;  // give up on a stuck I2C transfer
 const uint8_t  LCD_COLS = 20;
 const uint8_t  LCD_ROWS = 4;
 
@@ -150,6 +151,13 @@ void setup() {
 
   lcd.init();                           // calls Wire.begin() itself
   Wire.setClock(I2C_CLOCK);             // after init(), which resets it
+
+  // Without a timeout, a glitch on the LCD's I2C bus can leave Wire waiting
+  // forever, freezing the whole sketch with the relays as they were -
+  // including an entry held open. Give up after 25 ms and reset the bus;
+  // the next redraw's resync repairs the screen. Needs Arduino AVR Boards
+  // 1.8.3 or later. Set after init(), whose Wire.begin() would clear it.
+  Wire.setWireTimeout(I2C_TIMEOUT_US, true);
   lcd.backlight();
   showUtf8(BOOT_TEXT);
 

@@ -52,9 +52,17 @@ const char *API_URL    = "https://rezervacekluziste.cz/logic/turniket_api/valida
 const char *API_HEADER = "Hash";
 const char *API_TOKEN  = SECRET_API_TOKEN;
 
-// Kept below the Nano's 10 s REPLY_TIMEOUT so a slow server still leaves
-// time for the answer to arrive before the Nano gives up.
-const uint16_t API_TIMEOUT_MS = 4000;
+// Each phase of the request has its own limit. HTTPClient's setTimeout()
+// covers only waiting for the reply; connecting and the TLS handshake are
+// separate, and the handshake defaults to 120 seconds.
+const uint16_t API_CONNECT_TIMEOUT_MS  = 3000;
+const uint8_t  API_HANDSHAKE_TIMEOUT_S = 4;     // seconds, not ms
+const uint16_t API_TIMEOUT_MS          = 4000;  // waiting for the reply
+
+// The phases can still add up past the Nano's 10 s REPLY_TIMEOUT. A result
+// later than this is replaced by a denial, so a ticket never opens the
+// turnstile after its holder has given up and walked away.
+const uint16_t RESULT_DEADLINE_MS = 9000;
 
 // Ignore a repeat of the same code within this window. Stops a stuttering
 // scanner or a reflected byte stream from hammering the server.
@@ -76,6 +84,7 @@ const char *MSG_NO_CONNECT = "Chyba připojení";
 const char *MSG_NO_SERVER  = "Server nedostupný";
 const char *MSG_BAD_JSON   = "Chybná odpověď serveru";
 const char *MSG_EMPTY      = "Bez zprávy";
+const char *MSG_TOO_SLOW   = "Server neodpovídá";
 
 // Leave the Nano's boot text up this long before the first idle prompt.
 // Also gives the Nano time to come out of its bootloader.
@@ -121,13 +130,15 @@ char   msgBuf[MAX_MSG_LEN + 1];
 size_t msgLen = 0;
 
 static bool     otaStarted   = false;
-static bool     wifiUp       = false;
+static volatile bool wifiUp  = false;   // set by the WiFi event task
 static uint32_t lastCheckMs  = 0;
 static bool     checkedOnce  = false;
 
 static String   lastCode;
 static uint32_t lastCodeMs = 0;
 
+// Touched only by linkTask: everything that goes to the Nano is sent from
+// that one task, so lines cannot interleave and no other task drains RX.
 static uint32_t busyUntilMs = BOOT_TEXT_MS;   // no idle prompt before then
 static bool     idlePending = true;           // idle prompt due once quiet
 
@@ -296,8 +307,11 @@ static void sendLine(const String &line) {
   Serial2.println(tail);
 }
 
+void sendMessageOnly(const String &text);
+
 // --- Nano link task, pinned to core 0 ------------------------------------
 // Stack is generous because the TLS handshake for the API call runs here.
+// This is the only task that reads or writes Serial2.
 void linkTask(void *pv) {
   for (;;) {
     while (Serial2.available()) {
@@ -324,6 +338,15 @@ void linkTask(void *pv) {
         }
       }
     }
+
+    // Put the idle prompt up once the result has had its time. Sent once
+    // per result, not repeated: the Nano keeps whatever it was last sent.
+    if (SEND_LCD_MESSAGES && idlePending &&
+        (int32_t)(millis() - busyUntilMs) >= 0) {
+      idlePending = false;
+      sendMessageOnly(MSG_IDLE);
+    }
+
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -362,6 +385,8 @@ void sendToNano(const Control &ctl, const String &message) {
 
 // POST the scanned code and act on the response.
 void validateCode(const char *code) {
+  uint32_t startedMs = millis();
+
   if (!wifiUp) {
     sendToNano(controlForAction("DENY"), MSG_NO_WIFI);
     return;
@@ -369,8 +394,10 @@ void validateCode(const char *code) {
 
   WiFiClientSecure client;
   client.setInsecure();          // no cert validation - trusted LAN only
+  client.setHandshakeTimeout(API_HANDSHAKE_TIMEOUT_S);
 
   HTTPClient http;
+  http.setConnectTimeout(API_CONNECT_TIMEOUT_MS);
   http.setTimeout(API_TIMEOUT_MS);
 
   if (!http.begin(client, API_URL)) {
@@ -400,6 +427,13 @@ void validateCode(const char *code) {
   String payload = http.getString();
   http.end();
   Serial.printf("api: HTTP %d %s\n", status, payload.c_str());
+
+  uint32_t tookMs = millis() - startedMs;
+  if (tookMs > RESULT_DEADLINE_MS) {
+    Serial.printf("api: answer took %u ms, too late - denying\n", (unsigned)tookMs);
+    sendToNano(controlForAction("DENY"), MSG_TOO_SLOW);
+    return;
+  }
 
   JsonDocument resDoc;
   if (deserializeJson(resDoc, payload)) {
@@ -455,8 +489,9 @@ void handleMessage(const char *msg) {
   Serial.print("from Nano: ");
   Serial.println(msg);
 
-  // "Checking" text while the request runs. The result replaces it.
-  busyUntilMs = millis() + API_TIMEOUT_MS + RESULT_SHOW_MS;
+  // "Checking" text while the request runs. The result replaces it, and
+  // sendToNano() sets the real quiet period.
+  busyUntilMs = millis() + RESULT_DEADLINE_MS + RESULT_SHOW_MS;
   sendMessageOnly(MSG_BUSY);
 
   validateCode(msg);
@@ -598,13 +633,7 @@ void loop() {
     }
   }
 
-  // Put the idle prompt up once the result has had its time. Sent once per
-  // result, not repeated: the Nano keeps whatever it was last sent.
-  if (SEND_LCD_MESSAGES && idlePending &&
-      (int32_t)(millis() - busyUntilMs) >= 0) {
-    idlePending = false;
-    sendMessageOnly(MSG_IDLE);
-  }
+  // The idle prompt is sent from linkTask, which owns the Nano link.
 
   delay(10);
 }

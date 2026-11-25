@@ -104,7 +104,10 @@ sent. Relays and arrow work the same; the boot text stays on screen.
 
 | Constant | Where | Value | Purpose |
 |----------|-------|-------|---------|
-| `API_TIMEOUT_MS` | ESP32 | 4000 | must stay below the Nano's `REPLY_TIMEOUT` |
+| `API_CONNECT_TIMEOUT_MS` | ESP32 | 3000 | TCP connect to the validator |
+| `API_HANDSHAKE_TIMEOUT_S` | ESP32 | 4 s | TLS handshake (library default is 120 s) |
+| `API_TIMEOUT_MS` | ESP32 | 4000 | waiting for the validator's reply |
+| `RESULT_DEADLINE_MS` | ESP32 | 9000 | a result later than this is sent as DENY ("Server neodpovídá"); must stay below the Nano's `REPLY_TIMEOUT` |
 | `REPLY_TIMEOUT` | Nano | 10000 | gives up waiting for a `CTL:` and closes the entry; the screen is left alone |
 | `REPEAT_LOCKOUT_MS` | ESP32 | 2000 | same code twice in a row is one scan |
 | `REPEAT_LOCKOUT_MS` | Nano | 2500 | drops the repeat before sending, so the Nano never waits for a reply the ESP32 will not give; kept above the ESP32's |

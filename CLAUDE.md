@@ -155,6 +155,12 @@ it is until the ESP32 answers for the new code. This is deliberate.
   used freely on the ESP32 only.
 - `loop()` on the Nano must not block. SoftwareSerial drops scanner bytes
   during any `delay()`.
+- On the ESP32, **only `linkTask` touches `Serial2`**. Anything for the Nano
+  (results, the idle prompt) is sent from that task, so lines cannot
+  interleave and no other task drains a scan out of the RX buffer.
+- The Nano's I2C has a 25 ms timeout (`Wire.setWireTimeout`, Arduino AVR
+  Boards 1.8.3+). Without it a bus glitch can hang the sketch with the
+  relays frozen. It must be set after `lcd.init()`.
 - **IDE quirk:** the Arduino IDE injects function prototypes at the top of a
   `.ino`, above anything defined in it. A custom type used in a function
   signature must therefore live in a `.h`, which is why `turnstile.h` exists
