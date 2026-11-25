@@ -92,6 +92,11 @@ loads up to 8 accented letters into the display's custom character memory
 per message, and falls back to unaccented ASCII beyond that. Messages pass
 through the ESP32 byte for byte; nothing transliterates them.
 
+**The Nano never writes the screen on its own** after the boot text. All
+LCD content after boot comes from the ESP32 as `MSG:` lines, and a `CTL:`
+line is a complete answer without one. `SEND_LCD_MESSAGES` in the ESP32
+sketch switches every message off.
+
 **Word wrapping happens on the ESP32**, not the Nano, by padding each line
 to exactly 20 cells. Widths are counted in display cells rather than bytes,
 because an accented letter is 2 bytes but 1 cell.
@@ -118,11 +123,11 @@ it is until the ESP32 answers for the new code. This is deliberate.
    internet, because a MITM on the update path gets to run their own code on
    the board. The likely fix is an NTP sync (`configTime`) before the first
    update check, since an unset clock makes every certificate look invalid.
-3. **Idle and busy text are resent from the ESP32 every 12 seconds** to beat
-   the Nano's 15-second fallback to its own local strings. This causes a
-   visible repaint. The clean fix is one line on the Nano: put the Czech
-   strings in `IDLE_TEXT` / `BUSY_TEXT` with 20 leading spaces, then delete
-   the ESP32 refresh loop and `sendMessageOnly`.
+3. **The screen is never refreshed.** The Nano writes the LCD only at boot
+   and on a `MSG:` line, and the ESP32 sends the idle prompt once per
+   result, so a glitched screen stays glitched until the next message. With
+   `SEND_LCD_MESSAGES = false` (ESP32) the LCD is written only at boot -
+   meant as a stopgap while the screen hardware is unreliable.
 4. **No rollback protection.** A firmware build that crashes before reaching
    `checkForUpdate()` bricks the device until someone attaches USB. Requires
    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, which the Arduino IDE does not

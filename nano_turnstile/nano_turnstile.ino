@@ -28,8 +28,11 @@
  * A new scan does not cancel an entry in progress: the turnstile stays as
  * it is until the ESP32 answers for the new code.
  *
- * The message stays on screen exactly as long as the entry relay is held;
- * denials and local errors use MESSAGE_HOLD instead.
+ * The screen is written once at boot (BOOT_TEXT) and after that only when
+ * the ESP32 sends a MSG: line. The Nano never writes it on its own - no
+ * idle prompt, no "checking", no timeout text - so with the ESP32's
+ * SEND_LCD_MESSAGES off, the boot text stays up for good. A CTL: line is a
+ * complete answer on its own; no MSG: has to follow it.
  *
  * Every line on the ESP32 link, in both directions, ends in "*HH": a CRC-8
  * of everything before the '*'. Lines without a valid checksum are dropped,
@@ -94,17 +97,15 @@ const uint8_t  SCREEN_CHARS  = LCD_COLS * LCD_ROWS;   // 80
 const uint8_t  MAX_CODE_LEN  = 80;
 const uint16_t LINE_BUF_LEN  = 200;     // UTF-8 needs 2 bytes per accent
 const uint16_t REPLY_TIMEOUT = 10000;   // ms to wait for the ESP32
-const uint32_t MESSAGE_HOLD  = 15000;   // used when no relay hold is running
 
 // The ESP32 silently drops a repeat of the same code within its
 // REPEAT_LOCKOUT_MS (2 s). Drop it here first, with a margin, so the Nano
 // never waits for a reply that is not coming and then times out.
 const uint16_t REPEAT_LOCKOUT_MS = 2500;
 
-const char IDLE_TEXT[]    = "Prilozte QR kod";
-const char BUSY_TEXT[]    = "Overuji...";
-const char TIMEOUT_TEXT[] = "Server neodpovida";
-const char TOOLONG_TEXT[] = "Kod je prilis dlouhy";
+// Shown once at boot, on the second row like every ESP32 message (the 20
+// leading spaces fill the first row). UTF-8: czech_lcd.h renders the accent.
+const char BOOT_TEXT[] = "                    Líbeznice turniket";
 
 SoftwareSerial scanner(SCANNER_RX_PIN, SCANNER_TX_PIN, true);  // inverted
 LiquidCrystal_I2C lcd(LCD_ADDR, LCD_COLS, LCD_ROWS);
@@ -120,8 +121,6 @@ uint8_t displayBuf[SCREEN_CHARS];
 bool     awaitingReply  = false;
 uint32_t sentAtMs       = 0;
 
-bool     showingMessage = false;
-uint32_t messageUntilMs = 0;
 
 // Relay hold, independent of how long the message stays on screen.
 bool     holdActive   = false;
@@ -152,7 +151,7 @@ void setup() {
   lcd.init();                           // calls Wire.begin() itself
   Wire.setClock(I2C_CLOCK);             // after init(), which resets it
   lcd.backlight();
-  showUtf8(IDLE_TEXT);
+  showUtf8(BOOT_TEXT);
 
   scanner.begin(SCANNER_BAUD);
   Serial.begin(LINK_BAUD);              // hardware UART -> ESP32
@@ -176,22 +175,13 @@ void loop() {
     applyDefaults();
   }
 
-  // The ESP32 never answered.
+  // The ESP32 never answered: close up. The screen is left alone.
   if (awaitingReply && (millis() - sentAtMs) > REPLY_TIMEOUT) {
     awaitingReply = false;
     lineLen = 0;
     holdActive  = false;
     blinkActive = false;
     applyDefaults();
-    showUtf8(TIMEOUT_TEXT);
-    showingMessage = true;
-    messageUntilMs = millis() + MESSAGE_HOLD;
-  }
-
-  // Message expired: back to the idle prompt.
-  if (showingMessage && (int32_t)(millis() - messageUntilMs) >= 0) {
-    showingMessage = false;
-    showUtf8(IDLE_TEXT);
   }
 }
 
@@ -329,10 +319,7 @@ void readScanner() {
       if (codeLen < MAX_CODE_LEN) {
         codeBuf[codeLen++] = c;
       } else {
-        codeLen = 0;
-        showUtf8(TOOLONG_TEXT);
-        showingMessage = true;
-        messageUntilMs = millis() + MESSAGE_HOLD;
+        codeLen = 0;                    // too long to be a ticket: drop it
       }
     }
   }
@@ -351,8 +338,6 @@ void sendToEsp(const char *code) {
 
   awaitingReply = true;
   sentAtMs = millis();
-  showUtf8(BUSY_TEXT);
-  showingMessage = false;               // status, not a message: no hold
 }
 
 // --- ESP32 link ----------------------------------------------------------
@@ -364,7 +349,7 @@ void readLink() {
       if (lineLen > 0) {
         lineBuf[lineLen] = '\0';
         // Corrupted or unchecked lines are dropped, not displayed. A lost
-        // result shows as the reply timeout.
+        // result ends in the reply timeout.
         if (stripChecksum(lineBuf, lineLen)) handleLine(lineBuf);
         lineLen = 0;
       }
@@ -380,15 +365,14 @@ void readLink() {
 
 void handleLine(const char *line) {
   if (strncmp(line, "CTL:", 4) == 0) {
+    // The control line is the answer; a message may or may not follow.
+    awaitingReply = false;
     applyControl(line + 4);
   } else if (strncmp(line, "MSG:", 4) == 0) {
-    awaitingReply = false;
+    // Display only. It stays until the ESP32 sends the next one. It does
+    // not end the wait for an answer: the ESP32's "checking" text arrives
+    // before the result.
     showUtf8(line + 4);
-    showingMessage = true;
-
-    // Match the message to the entry hold; fall back to MESSAGE_HOLD when
-    // nothing is being held open (denials, errors).
-    messageUntilMs = holdActive ? holdUntilMs : (millis() + MESSAGE_HOLD);
   }
   // Anything else is not our protocol - ignore it rather than display it.
 }

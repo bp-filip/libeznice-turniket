@@ -17,10 +17,10 @@
  * HOLD is milliseconds; the Nano reverts to its defaults afterwards.
  * BLINK=YES makes the Nano blink the arrow for the duration of the hold.
  *
- * The idle prompt and the "checking" text are sent from here rather than
- * left to the Nano's own strings, so they carry diacritics and sit one row
- * down like every other message. The Nano still falls back to its local
- * text after 15 seconds, so the idle prompt is resent every 12.
+ * The Nano writes the screen only at boot and when it receives a MSG:
+ * line; everything else on the LCD comes from here. SEND_LCD_MESSAGES
+ * below turns all MSG: lines off: the relays keep working on CTL: lines
+ * alone and the Nano's boot text stays on screen.
  *
  * Server messages pass through byte for byte. Nothing is added or removed
  * except line breaks and padding for the 20x4 screen.
@@ -60,6 +60,12 @@ const uint16_t API_TIMEOUT_MS = 4000;
 // scanner or a reflected byte stream from hammering the server.
 const uint32_t REPEAT_LOCKOUT_MS = 2000;
 
+// --- LCD messages --------------------------------------------------------
+// true:  results, the idle prompt and the "checking" text go to the LCD.
+// false: nothing is ever sent to the LCD. Turnstile and arrow work exactly
+//        the same; the screen keeps showing the Nano's boot text.
+const bool SEND_LCD_MESSAGES = true;
+
 // --- Local status messages ----------------------------------------------
 // The only strings this firmware writes itself; everything else comes from
 // the server verbatim.
@@ -71,8 +77,9 @@ const char *MSG_NO_SERVER  = "Server nedostupný";
 const char *MSG_BAD_JSON   = "Chybná odpověď serveru";
 const char *MSG_EMPTY      = "Bez zprávy";
 
-// Resent below the Nano's 15 s fallback so its own idle text never shows.
-const uint32_t IDLE_REFRESH_MS = 12000;
+// Leave the Nano's boot text up this long before the first idle prompt.
+// Also gives the Nano time to come out of its bootloader.
+const uint32_t BOOT_TEXT_MS = 5000;
 
 // --- Display -------------------------------------------------------------
 const uint8_t LCD_COLS = 20;
@@ -84,9 +91,10 @@ const uint32_t HOLD_SINGLE_MS = 10UL * 1000UL;         // 10 seconds
 const uint32_t HOLD_MULTI_MS  = 5UL * 60UL * 1000UL;   // 5 minutes
 const uint32_t HOLD_MULTI_HOUR_MS = 60UL * 60UL * 1000UL;   // 1 hour
 
-// How long after a result to leave the screen alone before resuming the
-// idle prompt: the hold itself plus the Nano's message time.
-const uint32_t RESULT_QUIET_MS = 15000;
+// How long a result stays on screen before the idle prompt returns: as
+// long as the entry is held, or this long when nothing is held (denials,
+// errors).
+const uint32_t RESULT_SHOW_MS = 15000;
 
 // --- GitHub --------------------------------------------------------------
 #define GH_OWNER "bp-filip"
@@ -120,8 +128,8 @@ static bool     checkedOnce  = false;
 static String   lastCode;
 static uint32_t lastCodeMs = 0;
 
-static uint32_t busyUntilMs = 0;         // suppress idle refresh until then
-static uint32_t lastIdleMs  = 0;
+static uint32_t busyUntilMs = BOOT_TEXT_MS;   // no idle prompt before then
+static bool     idlePending = true;           // idle prompt due once quiet
 
 void handleMessage(const char *msg);
 
@@ -322,6 +330,7 @@ void linkTask(void *pv) {
 
 // Send display text with no control line attached.
 void sendMessageOnly(const String &text) {
+  if (!SEND_LCD_MESSAGES) return;
   sendLine("MSG:" + wrapWords(text));
   Serial2.flush();
   while (Serial2.available()) Serial2.read();   // discard our own echo
@@ -338,15 +347,16 @@ void sendToNano(const Control &ctl, const String &message) {
   // Drop anything that arrived while we were transmitting: on a crosstalking
   // link that is our own output coming back.
   sendLine(line);
-  sendLine("MSG:" + wrapWords(message));
+  if (SEND_LCD_MESSAGES) sendLine("MSG:" + wrapWords(message));
   Serial2.flush();
   while (Serial2.available()) Serial2.read();
 
-  // Leave the result on screen before the idle prompt returns.
-  busyUntilMs = millis() + ctl.holdMs + RESULT_QUIET_MS;
+  // Leave the result on screen, then put the idle prompt back once.
+  busyUntilMs = millis() + (ctl.holdMs > 0 ? ctl.holdMs : RESULT_SHOW_MS);
+  idlePending = true;
 
   Serial.println(line);
-  Serial.print("MSG:");
+  Serial.print(SEND_LCD_MESSAGES ? "MSG:" : "MSG (not sent):");
   Serial.println(message);
 }
 
@@ -445,8 +455,8 @@ void handleMessage(const char *msg) {
   Serial.print("from Nano: ");
   Serial.println(msg);
 
-  // Replace the Nano's own "checking" text with ours before the request.
-  busyUntilMs = millis() + API_TIMEOUT_MS + RESULT_QUIET_MS;
+  // "Checking" text while the request runs. The result replaces it.
+  busyUntilMs = millis() + API_TIMEOUT_MS + RESULT_SHOW_MS;
   sendMessageOnly(MSG_BUSY);
 
   validateCode(msg);
@@ -588,11 +598,11 @@ void loop() {
     }
   }
 
-  // Keep the idle prompt on screen. The Nano reverts to its own text after
-  // 15 s, so this has to be resent more often than that.
-  if ((int32_t)(millis() - busyUntilMs) >= 0 &&
-      (millis() - lastIdleMs) > IDLE_REFRESH_MS) {
-    lastIdleMs = millis();
+  // Put the idle prompt up once the result has had its time. Sent once per
+  // result, not repeated: the Nano keeps whatever it was last sent.
+  if (SEND_LCD_MESSAGES && idlePending &&
+      (int32_t)(millis() - busyUntilMs) >= 0) {
+    idlePending = false;
     sendMessageOnly(MSG_IDLE);
   }
 

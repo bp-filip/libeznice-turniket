@@ -55,8 +55,10 @@ letters per message into custom character memory.
 The backpack drives the controller four bits at a time. If one transfer is
 lost, every later character is read half a byte off and the screen shows
 garbage. The Nano resynchronises the controller before every redraw, so
-this now clears at the next message (at most about 12 seconds, the idle
-refresh). Redraws are also held back until 50 ms after any relay switches,
+this now clears at the next message. There is no periodic refresh any
+more, so garbage stays until the ESP32 sends something; with
+`SEND_LCD_MESSAGES = false` the screen is written only at boot and a glitch
+stays until the Nano restarts. Redraws are also held back until 50 ms after any relay switches,
 so the noise of a switching relay never coincides with an LCD transfer.
 Neither stops a glitch caused by a supply dip affecting the LCD on its
 own. Usual causes, and the
